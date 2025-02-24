@@ -1,16 +1,16 @@
-# ruff: noqa: UP007
 """This module provides a portal provider and portal for calling async functions from synchronous code."""
-
-from __future__ import annotations
 
 import asyncio
 import functools
 import queue
 import threading
-from typing import Any, Callable, Coroutine, Optional, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional, TypeVar, cast
 from warnings import warn
 
 from advanced_alchemy.exceptions import ImproperConfigurationError
+
+if TYPE_CHECKING:
+    from collections.abc import Coroutine
 
 __all__ = ("Portal", "PortalProvider", "PortalProviderSingleton")
 
@@ -18,16 +18,21 @@ _R = TypeVar("_R")
 
 
 class PortalProviderSingleton(type):
-    _instances: dict[type, PortalProvider] = {}
+    """A singleton metaclass for PortalProvider."""
 
-    def __call__(cls, *args: Any, **kwargs: Any) -> PortalProvider:
-        if cls not in cls._instances:
+    _instances: "ClassVar[dict[type, PortalProvider]]" = {}
+
+    def __call__(cls, *args: Any, **kwargs: Any) -> "PortalProvider":
+        if cls not in cls._instances:  # pyright: ignore[reportUnnecessaryContains]
             cls._instances[cls] = super().__call__(*args, **kwargs)
         return cls._instances[cls]  # pyright: ignore[reportUnknownVariableType,reportUnknownMemberType]
 
 
 class PortalProvider(metaclass=PortalProviderSingleton):
+    """A provider for creating and managing threaded portals."""
+
     def __init__(self) -> None:
+        """Initialize the PortalProvider."""
         self._request_queue: queue.Queue[
             tuple[
                 Callable[..., Coroutine[Any, Any, Any]],
@@ -42,7 +47,7 @@ class PortalProvider(metaclass=PortalProviderSingleton):
         self._ready_event: threading.Event = threading.Event()
 
     @property
-    def portal(self) -> Portal:
+    def portal(self) -> "Portal":
         """The portal instance."""
         return Portal(self)
 
@@ -57,7 +62,7 @@ class PortalProvider(metaclass=PortalProviderSingleton):
         return self._ready_event.is_set()
 
     @property
-    def loop(self) -> asyncio.AbstractEventLoop:  # pragma: no cover
+    def loop(self) -> "asyncio.AbstractEventLoop":  # pragma: no cover
         """The event loop."""
         if self._loop is None:
             msg = "The PortalProvider is not started.  Did you forget to call .start()?"
@@ -94,13 +99,16 @@ class PortalProvider(metaclass=PortalProviderSingleton):
         self._loop.run_forever()
 
     async def _async_caller(
-        self, func: Callable[..., Coroutine[Any, Any, _R]], args: tuple[Any, ...], kwargs: dict[str, Any]
+        self,
+        func: "Callable[..., Coroutine[Any, Any, _R]]",
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
     ) -> _R:
         """Wrapper to run the async function and send the result to the result queue."""
         result: _R = await func(*args, **kwargs)
         return result
 
-    def call(self, func: Callable[..., Coroutine[Any, Any, _R]], *args: Any, **kwargs: Any) -> _R:
+    def call(self, func: "Callable[..., Coroutine[Any, Any, _R]]", *args: Any, **kwargs: Any) -> _R:
         """Calls an async function from a synchronous context.
 
         Args:
@@ -132,7 +140,7 @@ class PortalProvider(metaclass=PortalProviderSingleton):
 
         if exception:
             raise exception
-        return cast(_R, result)
+        return cast("_R", result)
 
     def _process_request(self) -> None:  # pragma: no cover
         """Processes a request from the request queue in the event loop."""
@@ -144,13 +152,13 @@ class PortalProvider(metaclass=PortalProviderSingleton):
 
             # Attach a callback to handle the result/exception
             future.add_done_callback(
-                functools.partial(self._handle_future_result, local_result_queue=local_result_queue)  # pyright: ignore[reportArgumentType]
+                functools.partial(self._handle_future_result, local_result_queue=local_result_queue),  # pyright: ignore[reportArgumentType]
             )
 
     def _handle_future_result(
         self,
-        future: asyncio.Future[Any],
-        local_result_queue: queue.Queue[tuple[Optional[Any], Optional[Exception]]],
+        future: "asyncio.Future[Any]",
+        local_result_queue: "queue.Queue[tuple[Optional[Any], Optional[Exception]]]",
     ) -> None:  # pragma: no cover
         """Handles the result or exception from the completed future."""
         try:
@@ -161,9 +169,9 @@ class PortalProvider(metaclass=PortalProviderSingleton):
 
 
 class Portal:
-    def __init__(self, provider: PortalProvider) -> None:
+    def __init__(self, provider: "PortalProvider") -> None:
         self._provider = provider
 
-    def call(self, func: Callable[..., Coroutine[Any, Any, _R]], *args: Any, **kwargs: Any) -> _R:
+    def call(self, func: "Callable[..., Coroutine[Any, Any, _R]]", *args: Any, **kwargs: Any) -> _R:
         """Calls an async function using the associated PortalProvider."""
         return self._provider.call(func, *args, **kwargs)

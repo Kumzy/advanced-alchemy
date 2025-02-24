@@ -4,16 +4,21 @@ RepositoryService object is generic on the domain model type which
 should be a SQLAlchemy model.
 """
 
-from __future__ import annotations
-
+from collections.abc import AsyncIterator, Iterable, Sequence
 from contextlib import asynccontextmanager
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, AsyncIterator, ClassVar, Generic, Iterable, List, Optional, Sequence, cast
+from typing import Any, ClassVar, Generic, Optional, Union, cast
 
 from sqlalchemy import Select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio.scoping import async_scoped_session
+from sqlalchemy.orm import InstrumentedAttribute
+from sqlalchemy.sql import ColumnElement
 from typing_extensions import Self
 
+from advanced_alchemy.config.asyncio import SQLAlchemyAsyncConfig
 from advanced_alchemy.exceptions import AdvancedAlchemyError, ErrorMessages, ImproperConfigurationError, RepositoryError
+from advanced_alchemy.filters import StatementFilter
 from advanced_alchemy.repository import (
     SQLAlchemyAsyncQueryRepository,
 )
@@ -31,23 +36,13 @@ from advanced_alchemy.service.typing import (
 )
 from advanced_alchemy.utils.dataclass import Empty, EmptyType
 
-if TYPE_CHECKING:
-    from sqlalchemy import Select
-    from sqlalchemy.ext.asyncio import AsyncSession
-    from sqlalchemy.ext.asyncio.scoping import async_scoped_session
-    from sqlalchemy.orm import InstrumentedAttribute
-    from sqlalchemy.sql import ColumnElement
-
-    from advanced_alchemy.config.asyncio import SQLAlchemyAsyncConfig
-    from advanced_alchemy.filters import StatementFilter
-
 
 class SQLAlchemyAsyncQueryService(ResultConverter):
     """Simple service to execute the basic Query repository.."""
 
     def __init__(
         self,
-        session: AsyncSession | async_scoped_session[AsyncSession],
+        session: Union[AsyncSession, async_scoped_session[AsyncSession]],
         **repo_kwargs: Any,
     ) -> None:
         """Configure the service object.
@@ -65,8 +60,8 @@ class SQLAlchemyAsyncQueryService(ResultConverter):
     @asynccontextmanager
     async def new(
         cls,
-        session: AsyncSession | async_scoped_session[AsyncSession] | None = None,
-        config: SQLAlchemyAsyncConfig | None = None,
+        session: Optional[Union[AsyncSession, async_scoped_session[AsyncSession]]] = None,
+        config: Optional[SQLAlchemyAsyncConfig] = None,
     ) -> AsyncIterator[Self]:
         """Context manager that returns instance of service object.
 
@@ -90,27 +85,33 @@ class SQLAlchemyAsyncRepositoryReadService(ResultConverter, Generic[ModelT, SQLA
 
     repository_type: type[SQLAlchemyAsyncRepositoryT]
     """Type of the repository to use."""
-    loader_options: ClassVar[LoadSpec | None] = None
+    loader_options: ClassVar[Optional[LoadSpec]] = None
     """Default loader options for the repository."""
-    execution_options: dict[str, Any] | None = None
+    execution_options: ClassVar[Optional[dict[str, Any]]] = None
     """Default execution options for the repository."""
-    match_fields: list[str] | str | None = None
+    match_fields: ClassVar[Optional[Union[list[str], str]]] = None
     """List of dialects that prefer to use ``field.id = ANY(:1)`` instead of ``field.id IN (...)``."""
+    uniquify: ClassVar[bool] = False
+    """Optionally apply the ``unique()`` method to results before returning."""
+    count_with_window_function: ClassVar[bool] = True
+    """Use an analytical window function to count results.  This allows the count to be performed in a single query."""
     _repository_instance: SQLAlchemyAsyncRepositoryT
 
     def __init__(
         self,
-        session: AsyncSession | async_scoped_session[AsyncSession],
+        session: Union[AsyncSession, async_scoped_session[AsyncSession]],
         *,
-        statement: Select[Any] | None = None,
+        statement: Optional[Select[Any]] = None,
         auto_expunge: bool = False,
         auto_refresh: bool = True,
         auto_commit: bool = False,
-        order_by: list[OrderingPair] | OrderingPair | None = None,
-        error_messages: ErrorMessages | None | EmptyType = Empty,
+        order_by: Optional[Union[list[OrderingPair], OrderingPair]] = None,
+        error_messages: Union[ErrorMessages, None, EmptyType] = Empty,
         wrap_exceptions: bool = True,
-        load: LoadSpec | None = None,
-        execution_options: dict[str, Any] | None = None,
+        load: Optional[LoadSpec] = None,
+        execution_options: Optional[dict[str, Any]] = None,
+        uniquify: Optional[bool] = None,
+        count_with_window_function: Optional[bool] = None,
         **repo_kwargs: Any,
     ) -> None:
         """Configure the service object.
@@ -126,10 +127,15 @@ class SQLAlchemyAsyncRepositoryReadService(ResultConverter, Generic[ModelT, SQLA
             wrap_exceptions: Wrap exceptions in a RepositoryError
             load: Set default relationships to be loaded
             execution_options: Set default execution options
+            uniquify: Optionally apply the ``unique()`` method to results before returning.
+            count_with_window_function: When false, list and count will use two queries instead of an analytical window function.
             **repo_kwargs: passed as keyword args to repo instantiation.
         """
         load = load if load is not None else self.loader_options
         execution_options = execution_options if execution_options is not None else self.execution_options
+        count_with_window_function = (
+            count_with_window_function if count_with_window_function is not None else self.count_with_window_function
+        )
         self._repository_instance: SQLAlchemyAsyncRepositoryT = self.repository_type(  # type: ignore[assignment]
             session=session,
             statement=statement,
@@ -141,8 +147,13 @@ class SQLAlchemyAsyncRepositoryReadService(ResultConverter, Generic[ModelT, SQLA
             wrap_exceptions=wrap_exceptions,
             load=load,
             execution_options=execution_options,
+            uniquify=self._get_uniquify(uniquify),
+            count_with_window_function=count_with_window_function,
             **repo_kwargs,
         )
+
+    def _get_uniquify(self, uniquify: Optional[bool] = None) -> bool:
+        return bool(uniquify or self.uniquify)
 
     @property
     def repository(self) -> SQLAlchemyAsyncRepositoryT:
@@ -159,11 +170,12 @@ class SQLAlchemyAsyncRepositoryReadService(ResultConverter, Generic[ModelT, SQLA
 
     async def count(
         self,
-        *filters: StatementFilter | ColumnElement[bool],
-        statement: Select[tuple[ModelT]] | None = None,
-        error_messages: ErrorMessages | None | EmptyType = Empty,
-        load: LoadSpec | None = None,
-        execution_options: dict[str, Any] | None = None,
+        *filters: Union[StatementFilter, ColumnElement[bool]],
+        statement: Optional[Select[tuple[ModelT]]] = None,
+        error_messages: Union[ErrorMessages, None, EmptyType] = Empty,
+        load: Optional[LoadSpec] = None,
+        execution_options: Optional[dict[str, Any]] = None,
+        uniquify: Optional[bool] = None,
         **kwargs: Any,
     ) -> int:
         """Count of records returned by query.
@@ -175,6 +187,7 @@ class SQLAlchemyAsyncRepositoryReadService(ResultConverter, Generic[ModelT, SQLA
                 for friendlier error messages to clients
             load: Set relationships to be loaded
             execution_options: Set default execution options
+            uniquify: Optionally apply the ``unique()`` method to results before returning.
             **kwargs: key value pairs of filter types.
 
         Returns:
@@ -186,15 +199,17 @@ class SQLAlchemyAsyncRepositoryReadService(ResultConverter, Generic[ModelT, SQLA
             error_messages=error_messages,
             load=load,
             execution_options=execution_options,
+            uniquify=self._get_uniquify(uniquify),
             **kwargs,
         )
 
     async def exists(
         self,
-        *filters: StatementFilter | ColumnElement[bool],
-        error_messages: ErrorMessages | None | EmptyType = Empty,
-        load: LoadSpec | None = None,
-        execution_options: dict[str, Any] | None = None,
+        *filters: Union[StatementFilter, ColumnElement[bool]],
+        error_messages: Union[ErrorMessages, None, EmptyType] = Empty,
+        load: Optional[LoadSpec] = None,
+        execution_options: Optional[dict[str, Any]] = None,
+        uniquify: Optional[bool] = None,
         **kwargs: Any,
     ) -> bool:
         """Wrap repository exists operation.
@@ -205,6 +220,7 @@ class SQLAlchemyAsyncRepositoryReadService(ResultConverter, Generic[ModelT, SQLA
                 for friendlier error messages to clients
             load: Set relationships to be loaded
             execution_options: Set default execution options
+            uniquify: Optionally apply the ``unique()`` method to results before returning.
             **kwargs: Keyword arguments for attribute based filtering.
 
         Returns:
@@ -215,6 +231,7 @@ class SQLAlchemyAsyncRepositoryReadService(ResultConverter, Generic[ModelT, SQLA
             error_messages=error_messages,
             load=load,
             execution_options=execution_options,
+            uniquify=self._get_uniquify(uniquify),
             **kwargs,
         )
 
@@ -222,12 +239,13 @@ class SQLAlchemyAsyncRepositoryReadService(ResultConverter, Generic[ModelT, SQLA
         self,
         item_id: Any,
         *,
-        statement: Select[tuple[ModelT]] | None = None,
-        id_attribute: str | InstrumentedAttribute[Any] | None = None,
-        auto_expunge: bool | None = None,
-        error_messages: ErrorMessages | None | EmptyType = Empty,
-        load: LoadSpec | None = None,
-        execution_options: dict[str, Any] | None = None,
+        statement: Optional[Select[tuple[ModelT]]] = None,
+        id_attribute: Optional[Union[str, InstrumentedAttribute[Any]]] = None,
+        auto_expunge: Optional[bool] = None,
+        error_messages: Union[ErrorMessages, None, EmptyType] = Empty,
+        load: Optional[LoadSpec] = None,
+        execution_options: Optional[dict[str, Any]] = None,
+        uniquify: Optional[bool] = None,
     ) -> ModelT:
         """Wrap repository scalar operation.
 
@@ -241,8 +259,7 @@ class SQLAlchemyAsyncRepositoryReadService(ResultConverter, Generic[ModelT, SQLA
                 for friendlier error messages to clients
             load: Set relationships to be loaded
             execution_options: Set default execution options
-
-
+            uniquify: Optionally apply the ``unique()`` method to results before returning.
 
         Returns:
             Representation of instance with identifier `item_id`.
@@ -257,17 +274,19 @@ class SQLAlchemyAsyncRepositoryReadService(ResultConverter, Generic[ModelT, SQLA
                 error_messages=error_messages,
                 load=load,
                 execution_options=execution_options,
+                uniquify=self._get_uniquify(uniquify),
             ),
         )
 
     async def get_one(
         self,
-        *filters: StatementFilter | ColumnElement[bool],
-        statement: Select[tuple[ModelT]] | None = None,
-        auto_expunge: bool | None = None,
-        load: LoadSpec | None = None,
-        error_messages: ErrorMessages | None | EmptyType = Empty,
-        execution_options: dict[str, Any] | None = None,
+        *filters: Union[StatementFilter, ColumnElement[bool]],
+        statement: Optional[Select[tuple[ModelT]]] = None,
+        auto_expunge: Optional[bool] = None,
+        load: Optional[LoadSpec] = None,
+        error_messages: Union[ErrorMessages, None, EmptyType] = Empty,
+        execution_options: Optional[dict[str, Any]] = None,
+        uniquify: Optional[bool] = None,
         **kwargs: Any,
     ) -> ModelT:
         """Wrap repository scalar operation.
@@ -280,6 +299,7 @@ class SQLAlchemyAsyncRepositoryReadService(ResultConverter, Generic[ModelT, SQLA
                 for friendlier error messages to clients
             load: Set default relationships to be loaded
             execution_options: Set default execution options
+            uniquify: Optionally apply the ``unique()`` method to results before returning.
             **kwargs: Identifier of the instance to be retrieved.
 
         Returns:
@@ -294,20 +314,22 @@ class SQLAlchemyAsyncRepositoryReadService(ResultConverter, Generic[ModelT, SQLA
                 error_messages=error_messages,
                 load=load,
                 execution_options=execution_options,
+                uniquify=self._get_uniquify(uniquify),
                 **kwargs,
             ),
         )
 
     async def get_one_or_none(
         self,
-        *filters: StatementFilter | ColumnElement[bool],
-        statement: Select[tuple[ModelT]] | None = None,
-        auto_expunge: bool | None = None,
-        error_messages: ErrorMessages | None | EmptyType = Empty,
-        load: LoadSpec | None = None,
-        execution_options: dict[str, Any] | None = None,
+        *filters: Union[StatementFilter, ColumnElement[bool]],
+        statement: Optional[Select[tuple[ModelT]]] = None,
+        auto_expunge: Optional[bool] = None,
+        error_messages: Union[ErrorMessages, None, EmptyType] = Empty,
+        load: Optional[LoadSpec] = None,
+        execution_options: Optional[dict[str, Any]] = None,
+        uniquify: Optional[bool] = None,
         **kwargs: Any,
-    ) -> ModelT | None:
+    ) -> Optional[ModelT]:
         """Wrap repository scalar operation.
 
         Args:
@@ -318,6 +340,7 @@ class SQLAlchemyAsyncRepositoryReadService(ResultConverter, Generic[ModelT, SQLA
                 for friendlier error messages to clients
             load: Set default relationships to be loaded
             execution_options: Set default execution options
+            uniquify: Optionally apply the ``unique()`` method to results before returning.
             **kwargs: Identifier of the instance to be retrieved.
 
         Returns:
@@ -332,11 +355,12 @@ class SQLAlchemyAsyncRepositoryReadService(ResultConverter, Generic[ModelT, SQLA
                 error_messages=error_messages,
                 load=load,
                 execution_options=execution_options,
+                uniquify=self._get_uniquify(uniquify),
                 **kwargs,
             ),
         )
 
-    async def to_model_on_create(self, data: ModelDictT[ModelT]) -> ModelDictT[ModelT]:
+    async def to_model_on_create(self, data: "ModelDictT[ModelT]") -> "ModelDictT[ModelT]":
         """Convenience method to allow for custom behavior on create.
 
         Args:
@@ -347,7 +371,7 @@ class SQLAlchemyAsyncRepositoryReadService(ResultConverter, Generic[ModelT, SQLA
         """
         return data
 
-    async def to_model_on_update(self, data: ModelDictT[ModelT]) -> ModelDictT[ModelT]:
+    async def to_model_on_update(self, data: "ModelDictT[ModelT]") -> "ModelDictT[ModelT]":
         """Convenience method to allow for custom behavior on update.
 
         Args:
@@ -358,7 +382,7 @@ class SQLAlchemyAsyncRepositoryReadService(ResultConverter, Generic[ModelT, SQLA
         """
         return data
 
-    async def to_model_on_delete(self, data: ModelDictT[ModelT]) -> ModelDictT[ModelT]:
+    async def to_model_on_delete(self, data: "ModelDictT[ModelT]") -> "ModelDictT[ModelT]":
         """Convenience method to allow for custom behavior on delete.
 
         Args:
@@ -369,7 +393,7 @@ class SQLAlchemyAsyncRepositoryReadService(ResultConverter, Generic[ModelT, SQLA
         """
         return data
 
-    async def to_model_on_upsert(self, data: ModelDictT[ModelT]) -> ModelDictT[ModelT]:
+    async def to_model_on_upsert(self, data: "ModelDictT[ModelT]") -> "ModelDictT[ModelT]":
         """Convenience method to allow for custom behavior on upsert.
 
         Args:
@@ -382,8 +406,8 @@ class SQLAlchemyAsyncRepositoryReadService(ResultConverter, Generic[ModelT, SQLA
 
     async def to_model(
         self,
-        data: ModelDictT[ModelT],
-        operation: str | None = None,
+        data: "ModelDictT[ModelT]",
+        operation: Optional[str] = None,
     ) -> ModelT:
         """Parse and Convert input into a model.
 
@@ -423,14 +447,15 @@ class SQLAlchemyAsyncRepositoryReadService(ResultConverter, Generic[ModelT, SQLA
 
     async def list_and_count(
         self,
-        *filters: StatementFilter | ColumnElement[bool],
-        statement: Select[tuple[ModelT]] | None = None,
-        auto_expunge: bool | None = None,
-        force_basic_query_mode: bool | None = None,
-        order_by: list[OrderingPair] | OrderingPair | None = None,
-        error_messages: ErrorMessages | None | EmptyType = Empty,
-        load: LoadSpec | None = None,
-        execution_options: dict[str, Any] | None = None,
+        *filters: Union[StatementFilter, ColumnElement[bool]],
+        statement: Optional[Select[tuple[ModelT]]] = None,
+        auto_expunge: Optional[bool] = None,
+        count_with_window_function: Optional[bool] = None,
+        order_by: Optional[Union[list[OrderingPair], OrderingPair]] = None,
+        error_messages: Union[ErrorMessages, None, EmptyType] = Empty,
+        load: Optional[LoadSpec] = None,
+        execution_options: Optional[dict[str, Any]] = None,
+        uniquify: Optional[bool] = None,
         **kwargs: Any,
     ) -> tuple[Sequence[ModelT], int]:
         """List of records and total count returned by query.
@@ -439,12 +464,13 @@ class SQLAlchemyAsyncRepositoryReadService(ResultConverter, Generic[ModelT, SQLA
             *filters: Types for specific filtering operations.
             statement: To facilitate customization of the underlying select query.
             auto_expunge: Remove object from session before returning.
-            force_basic_query_mode: Force list and count to use two queries instead of an analytical window function.
+            count_with_window_function: When false, list and count will use two queries instead of an analytical window function.
             order_by: Set default order options for queries.
             error_messages: An optional dictionary of templates to use
                 for friendlier error messages to clients
             load: Set relationships to be loaded
             execution_options: Set default execution options
+            uniquify: Optionally apply the ``unique()`` method to results before returning.
             **kwargs: Instance attribute value filters.
 
         Returns:
@@ -456,11 +482,12 @@ class SQLAlchemyAsyncRepositoryReadService(ResultConverter, Generic[ModelT, SQLA
                 *filters,
                 statement=statement,
                 auto_expunge=auto_expunge,
-                force_basic_query_mode=force_basic_query_mode,
+                count_with_window_function=count_with_window_function,
                 order_by=order_by,
                 error_messages=error_messages,
                 load=load,
                 execution_options=execution_options,
+                uniquify=self._get_uniquify(uniquify),
                 **kwargs,
             ),
         )
@@ -469,12 +496,14 @@ class SQLAlchemyAsyncRepositoryReadService(ResultConverter, Generic[ModelT, SQLA
     @asynccontextmanager
     async def new(
         cls,
-        session: AsyncSession | async_scoped_session[AsyncSession] | None = None,
-        statement: Select[tuple[ModelT]] | None = None,
-        config: SQLAlchemyAsyncConfig | None = None,
-        error_messages: ErrorMessages | None | EmptyType = Empty,
-        load: LoadSpec | None = None,
-        execution_options: dict[str, Any] | None = None,
+        session: Optional[Union[AsyncSession, async_scoped_session[AsyncSession]]] = None,
+        statement: Optional[Select[tuple[ModelT]]] = None,
+        config: Optional[SQLAlchemyAsyncConfig] = None,
+        error_messages: Union[ErrorMessages, None, EmptyType] = Empty,
+        load: Optional[LoadSpec] = None,
+        execution_options: Optional[dict[str, Any]] = None,
+        uniquify: Optional[bool] = None,
+        count_with_window_function: Optional[bool] = None,
     ) -> AsyncIterator[Self]:
         """Context manager that returns instance of service object.
 
@@ -493,6 +522,8 @@ class SQLAlchemyAsyncRepositoryReadService(ResultConverter, Generic[ModelT, SQLA
                 error_messages=error_messages,
                 load=load,
                 execution_options=execution_options,
+                uniquify=uniquify,
+                count_with_window_function=count_with_window_function,
             )
         elif config:
             async with config.get_session() as db_session:
@@ -502,17 +533,20 @@ class SQLAlchemyAsyncRepositoryReadService(ResultConverter, Generic[ModelT, SQLA
                     error_messages=error_messages,
                     load=load,
                     execution_options=execution_options,
+                    uniquify=uniquify,
+                    count_with_window_function=count_with_window_function,
                 )
 
     async def list(
         self,
-        *filters: StatementFilter | ColumnElement[bool],
-        statement: Select[tuple[ModelT]] | None = None,
-        auto_expunge: bool | None = None,
-        order_by: list[OrderingPair] | OrderingPair | None = None,
-        error_messages: ErrorMessages | None | EmptyType = Empty,
-        load: LoadSpec | None = None,
-        execution_options: dict[str, Any] | None = None,
+        *filters: Union[StatementFilter, ColumnElement[bool]],
+        statement: Optional[Select[tuple[ModelT]]] = None,
+        auto_expunge: Optional[bool] = None,
+        order_by: Optional[Union[list[OrderingPair], OrderingPair]] = None,
+        error_messages: Union[ErrorMessages, None, EmptyType] = Empty,
+        load: Optional[LoadSpec] = None,
+        execution_options: Optional[dict[str, Any]] = None,
+        uniquify: Optional[bool] = None,
         **kwargs: Any,
     ) -> Sequence[ModelT]:
         """Wrap repository scalars operation.
@@ -526,6 +560,7 @@ class SQLAlchemyAsyncRepositoryReadService(ResultConverter, Generic[ModelT, SQLA
                 for friendlier error messages to clients
             load: Set default relationships to be loaded
             execution_options: Set default execution options
+            uniquify: Optionally apply the ``unique()`` method to results before returning.
             **kwargs: Instance attribute value filters.
 
         Returns:
@@ -541,6 +576,7 @@ class SQLAlchemyAsyncRepositoryReadService(ResultConverter, Generic[ModelT, SQLA
                 error_messages=error_messages,
                 load=load,
                 execution_options=execution_options,
+                uniquify=self._get_uniquify(uniquify),
                 **kwargs,
             ),
         )
@@ -554,13 +590,13 @@ class SQLAlchemyAsyncRepositoryService(
 
     async def create(
         self,
-        data: ModelDictT[ModelT],
+        data: "ModelDictT[ModelT]",
         *,
-        auto_commit: bool | None = None,
-        auto_expunge: bool | None = None,
-        auto_refresh: bool | None = None,
-        error_messages: ErrorMessages | None | EmptyType = Empty,
-    ) -> ModelT:
+        auto_commit: Optional[bool] = None,
+        auto_expunge: Optional[bool] = None,
+        auto_refresh: Optional[bool] = None,
+        error_messages: Union[ErrorMessages, None, EmptyType] = Empty,
+    ) -> "ModelT":
         """Wrap repository instance creation.
 
         Args:
@@ -588,11 +624,11 @@ class SQLAlchemyAsyncRepositoryService(
 
     async def create_many(
         self,
-        data: BulkModelDictT[ModelT],
+        data: "BulkModelDictT[ModelT]",
         *,
-        auto_commit: bool | None = None,
-        auto_expunge: bool | None = None,
-        error_messages: ErrorMessages | None | EmptyType = Empty,
+        auto_commit: Optional[bool] = None,
+        auto_expunge: Optional[bool] = None,
+        error_messages: Union[ErrorMessages, None, EmptyType] = Empty,
     ) -> Sequence[ModelT]:
         """Wrap repository bulk instance creation.
 
@@ -602,6 +638,7 @@ class SQLAlchemyAsyncRepositoryService(
             auto_commit: Commit objects before returning.
             error_messages: An optional dictionary of templates to use
                 for friendlier error messages to clients
+            uniquify: Optionally apply the ``unique()`` method to results before returning.
 
         Returns:
             Representation of created instances.
@@ -612,7 +649,7 @@ class SQLAlchemyAsyncRepositoryService(
         return cast(
             "Sequence[ModelT]",
             await self.repository.add_many(
-                data=cast("List[ModelT]", data),  # pyright: ignore[reportUnnecessaryCast]
+                data=cast("list[ModelT]", data),  # pyright: ignore[reportUnnecessaryCast]
                 auto_commit=auto_commit,
                 auto_expunge=auto_expunge,
                 error_messages=error_messages,
@@ -621,19 +658,20 @@ class SQLAlchemyAsyncRepositoryService(
 
     async def update(
         self,
-        data: ModelDictT[ModelT],
-        item_id: Any | None = None,
+        data: "ModelDictT[ModelT]",
+        item_id: Optional[Any] = None,
         *,
-        attribute_names: Iterable[str] | None = None,
-        with_for_update: bool | None = None,
-        auto_commit: bool | None = None,
-        auto_expunge: bool | None = None,
-        auto_refresh: bool | None = None,
-        id_attribute: str | InstrumentedAttribute[Any] | None = None,
-        error_messages: ErrorMessages | None | EmptyType = Empty,
-        load: LoadSpec | None = None,
-        execution_options: dict[str, Any] | None = None,
-    ) -> ModelT:
+        attribute_names: Optional[Iterable[str]] = None,
+        with_for_update: Optional[bool] = None,
+        auto_commit: Optional[bool] = None,
+        auto_expunge: Optional[bool] = None,
+        auto_refresh: Optional[bool] = None,
+        id_attribute: Optional[Union[str, InstrumentedAttribute[Any]]] = None,
+        error_messages: Union[ErrorMessages, None, EmptyType] = Empty,
+        load: Optional[LoadSpec] = None,
+        execution_options: Optional[dict[str, Any]] = None,
+        uniquify: Optional[bool] = None,
+    ) -> "ModelT":
         """Wrap repository update operation.
 
         Args:
@@ -653,6 +691,7 @@ class SQLAlchemyAsyncRepositoryService(
                 for friendlier error messages to clients
             load: Set default relationships to be loaded
             execution_options: Set default execution options
+            uniquify: Optionally apply the ``unique()`` method to results before returning.
 
         Returns:
             Updated representation.
@@ -686,18 +725,20 @@ class SQLAlchemyAsyncRepositoryService(
                 error_messages=error_messages,
                 load=load,
                 execution_options=execution_options,
+                uniquify=self._get_uniquify(uniquify),
             ),
         )
 
     async def update_many(
         self,
-        data: BulkModelDictT[ModelT],
+        data: "BulkModelDictT[ModelT]",
         *,
-        auto_commit: bool | None = None,
-        auto_expunge: bool | None = None,
-        error_messages: ErrorMessages | None | EmptyType = Empty,
-        load: LoadSpec | None = None,
-        execution_options: dict[str, Any] | None = None,
+        auto_commit: Optional[bool] = None,
+        auto_expunge: Optional[bool] = None,
+        error_messages: Union[ErrorMessages, None, EmptyType] = Empty,
+        load: Optional[LoadSpec] = None,
+        execution_options: Optional[dict[str, Any]] = None,
+        uniquify: Optional[bool] = None,
     ) -> Sequence[ModelT]:
         """Wrap repository bulk instance update.
 
@@ -709,6 +750,7 @@ class SQLAlchemyAsyncRepositoryService(
                 for friendlier error messages to clients
             load: Set default relationships to be loaded
             execution_options: Set default execution options
+            uniquify: Optionally apply the ``unique()`` method to results before returning.
 
         Returns:
             Representation of updated instances.
@@ -719,29 +761,31 @@ class SQLAlchemyAsyncRepositoryService(
         return cast(
             "Sequence[ModelT]",
             await self.repository.update_many(
-                cast("List[ModelT]", data),  # pyright: ignore[reportUnnecessaryCast]
+                cast("list[ModelT]", data),  # pyright: ignore[reportUnnecessaryCast]
                 auto_commit=auto_commit,
                 auto_expunge=auto_expunge,
                 error_messages=error_messages,
                 load=load,
                 execution_options=execution_options,
+                uniquify=self._get_uniquify(uniquify),
             ),
         )
 
     async def upsert(
         self,
-        data: ModelDictT[ModelT],
-        item_id: Any | None = None,
+        data: "ModelDictT[ModelT]",
+        item_id: Optional[Any] = None,
         *,
-        attribute_names: Iterable[str] | None = None,
-        with_for_update: bool | None = None,
-        auto_expunge: bool | None = None,
-        auto_commit: bool | None = None,
-        auto_refresh: bool | None = None,
-        match_fields: list[str] | str | None = None,
-        error_messages: ErrorMessages | None | EmptyType = Empty,
-        load: LoadSpec | None = None,
-        execution_options: dict[str, Any] | None = None,
+        attribute_names: Optional[Iterable[str]] = None,
+        with_for_update: Optional[bool] = None,
+        auto_expunge: Optional[bool] = None,
+        auto_commit: Optional[bool] = None,
+        auto_refresh: Optional[bool] = None,
+        match_fields: Optional[Union[list[str], str]] = None,
+        error_messages: Union[ErrorMessages, None, EmptyType] = Empty,
+        load: Optional[LoadSpec] = None,
+        execution_options: Optional[dict[str, Any]] = None,
+        uniquify: Optional[bool] = None,
     ) -> ModelT:
         """Wrap repository upsert operation.
 
@@ -763,6 +807,7 @@ class SQLAlchemyAsyncRepositoryService(
                 for friendlier error messages to clients
             load: Set default relationships to be loaded
             execution_options: Set default execution options
+            uniquify: Optionally apply the ``unique()`` method to results before returning.
 
         Returns:
             Updated or created representation.
@@ -784,20 +829,22 @@ class SQLAlchemyAsyncRepositoryService(
                 error_messages=error_messages,
                 load=load,
                 execution_options=execution_options,
+                uniquify=self._get_uniquify(uniquify),
             ),
         )
 
     async def upsert_many(
         self,
-        data: BulkModelDictT[ModelT],
+        data: "BulkModelDictT[ModelT]",
         *,
-        auto_expunge: bool | None = None,
-        auto_commit: bool | None = None,
+        auto_expunge: Optional[bool] = None,
+        auto_commit: Optional[bool] = None,
         no_merge: bool = False,
-        match_fields: list[str] | str | None = None,
-        error_messages: ErrorMessages | None | EmptyType = Empty,
-        load: LoadSpec | None = None,
-        execution_options: dict[str, Any] | None = None,
+        match_fields: Optional[Union[list[str], str]] = None,
+        error_messages: Union[ErrorMessages, None, EmptyType] = Empty,
+        load: Optional[LoadSpec] = None,
+        execution_options: Optional[dict[str, Any]] = None,
+        uniquify: Optional[bool] = None,
     ) -> Sequence[ModelT]:
         """Wrap repository upsert operation.
 
@@ -812,6 +859,7 @@ class SQLAlchemyAsyncRepositoryService(
                 for friendlier error messages to clients
             load: Set default relationships to be loaded
             execution_options: Set default execution options
+            uniquify: Optionally apply the ``unique()`` method to results before returning.
 
         Returns:
             Updated or created representation.
@@ -822,7 +870,7 @@ class SQLAlchemyAsyncRepositoryService(
         return cast(
             "Sequence[ModelT]",
             await self.repository.upsert_many(
-                data=cast("List[ModelT]", data),  # pyright: ignore[reportUnnecessaryCast]
+                data=cast("list[ModelT]", data),  # pyright: ignore[reportUnnecessaryCast]
                 auto_expunge=auto_expunge,
                 auto_commit=auto_commit,
                 no_merge=no_merge,
@@ -830,22 +878,24 @@ class SQLAlchemyAsyncRepositoryService(
                 error_messages=error_messages,
                 load=load,
                 execution_options=execution_options,
+                uniquify=self._get_uniquify(uniquify),
             ),
         )
 
     async def get_or_upsert(
         self,
-        *filters: StatementFilter | ColumnElement[bool],
-        match_fields: list[str] | str | None = None,
+        *filters: Union[StatementFilter, ColumnElement[bool]],
+        match_fields: Optional[Union[list[str], str]] = None,
         upsert: bool = True,
-        attribute_names: Iterable[str] | None = None,
-        with_for_update: bool | None = None,
-        auto_commit: bool | None = None,
-        auto_expunge: bool | None = None,
-        auto_refresh: bool | None = None,
-        error_messages: ErrorMessages | None | EmptyType = Empty,
-        load: LoadSpec | None = None,
-        execution_options: dict[str, Any] | None = None,
+        attribute_names: Optional[Iterable[str]] = None,
+        with_for_update: Optional[bool] = None,
+        auto_commit: Optional[bool] = None,
+        auto_expunge: Optional[bool] = None,
+        auto_refresh: Optional[bool] = None,
+        error_messages: Union[ErrorMessages, None, EmptyType] = Empty,
+        load: Optional[LoadSpec] = None,
+        execution_options: Optional[dict[str, Any]] = None,
+        uniquify: Optional[bool] = None,
         **kwargs: Any,
     ) -> tuple[ModelT, bool]:
         """Wrap repository instance creation.
@@ -869,6 +919,7 @@ class SQLAlchemyAsyncRepositoryService(
                 for friendlier error messages to clients
             load: Set default relationships to be loaded
             execution_options: Set default execution options
+            uniquify: Optionally apply the ``unique()`` method to results before returning.
             **kwargs: Identifier of the instance to be retrieved.
 
         Returns:
@@ -890,22 +941,24 @@ class SQLAlchemyAsyncRepositoryService(
                 error_messages=error_messages,
                 load=load,
                 execution_options=execution_options,
+                uniquify=self._get_uniquify(uniquify),
                 **validated_model.to_dict(),
             ),
         )
 
     async def get_and_update(
         self,
-        *filters: StatementFilter | ColumnElement[bool],
-        match_fields: list[str] | str | None = None,
-        attribute_names: Iterable[str] | None = None,
-        with_for_update: bool | None = None,
-        auto_commit: bool | None = None,
-        auto_expunge: bool | None = None,
-        auto_refresh: bool | None = None,
-        error_messages: ErrorMessages | None | EmptyType = Empty,
-        load: LoadSpec | None = None,
-        execution_options: dict[str, Any] | None = None,
+        *filters: Union[StatementFilter, ColumnElement[bool]],
+        match_fields: Optional[Union[list[str], str]] = None,
+        attribute_names: Optional[Iterable[str]] = None,
+        with_for_update: Optional[bool] = None,
+        auto_commit: Optional[bool] = None,
+        auto_expunge: Optional[bool] = None,
+        auto_refresh: Optional[bool] = None,
+        error_messages: Union[ErrorMessages, None, EmptyType] = Empty,
+        load: Optional[LoadSpec] = None,
+        execution_options: Optional[dict[str, Any]] = None,
+        uniquify: Optional[bool] = None,
         **kwargs: Any,
     ) -> tuple[ModelT, bool]:
         """Wrap repository instance creation.
@@ -926,6 +979,7 @@ class SQLAlchemyAsyncRepositoryService(
                 for friendlier error messages to clients
             load: Set default relationships to be loaded
             execution_options: Set default execution options
+            uniquify: Optionally apply the ``unique()`` method to results before returning.
             **kwargs: Identifier of the instance to be retrieved.
 
         Returns:
@@ -946,6 +1000,7 @@ class SQLAlchemyAsyncRepositoryService(
                 error_messages=error_messages,
                 load=load,
                 execution_options=execution_options,
+                uniquify=self._get_uniquify(uniquify),
                 **validated_model.to_dict(),
             ),
         )
@@ -954,12 +1009,13 @@ class SQLAlchemyAsyncRepositoryService(
         self,
         item_id: Any,
         *,
-        auto_commit: bool | None = None,
-        auto_expunge: bool | None = None,
-        id_attribute: str | InstrumentedAttribute[Any] | None = None,
-        error_messages: ErrorMessages | None | EmptyType = Empty,
-        load: LoadSpec | None = None,
-        execution_options: dict[str, Any] | None = None,
+        auto_commit: Optional[bool] = None,
+        auto_expunge: Optional[bool] = None,
+        id_attribute: Optional[Union[str, InstrumentedAttribute[Any]]] = None,
+        error_messages: Union[ErrorMessages, None, EmptyType] = Empty,
+        load: Optional[LoadSpec] = None,
+        execution_options: Optional[dict[str, Any]] = None,
+        uniquify: Optional[bool] = None,
     ) -> ModelT:
         """Wrap repository delete operation.
 
@@ -973,6 +1029,7 @@ class SQLAlchemyAsyncRepositoryService(
                 for friendlier error messages to clients
             load: Set default relationships to be loaded
             execution_options: Set default execution options
+            uniquify: Optionally apply the ``unique()`` method to results before returning.
 
         Returns:
             Representation of the deleted instance.
@@ -987,6 +1044,7 @@ class SQLAlchemyAsyncRepositoryService(
                 error_messages=error_messages,
                 load=load,
                 execution_options=execution_options,
+                uniquify=self._get_uniquify(uniquify),
             ),
         )
 
@@ -994,13 +1052,14 @@ class SQLAlchemyAsyncRepositoryService(
         self,
         item_ids: list[Any],
         *,
-        auto_commit: bool | None = None,
-        auto_expunge: bool | None = None,
-        id_attribute: str | InstrumentedAttribute[Any] | None = None,
-        chunk_size: int | None = None,
-        error_messages: ErrorMessages | None | EmptyType = Empty,
-        load: LoadSpec | None = None,
-        execution_options: dict[str, Any] | None = None,
+        auto_commit: Optional[bool] = None,
+        auto_expunge: Optional[bool] = None,
+        id_attribute: Optional[Union[str, InstrumentedAttribute[Any]]] = None,
+        chunk_size: Optional[int] = None,
+        error_messages: Union[ErrorMessages, None, EmptyType] = Empty,
+        load: Optional[LoadSpec] = None,
+        execution_options: Optional[dict[str, Any]] = None,
+        uniquify: Optional[bool] = None,
     ) -> Sequence[ModelT]:
         """Wrap repository bulk instance deletion.
 
@@ -1016,6 +1075,7 @@ class SQLAlchemyAsyncRepositoryService(
                 for friendlier error messages to clients
             load: Set default relationships to be loaded
             execution_options: Set default execution options
+            uniquify: Optionally apply the ``unique()`` method to results before returning.
 
         Returns:
             Representation of removed instances.
@@ -1031,18 +1091,20 @@ class SQLAlchemyAsyncRepositoryService(
                 error_messages=error_messages,
                 load=load,
                 execution_options=execution_options,
+                uniquify=self._get_uniquify(uniquify),
             ),
         )
 
     async def delete_where(
         self,
-        *filters: StatementFilter | ColumnElement[bool],
-        auto_commit: bool | None = None,
-        auto_expunge: bool | None = None,
-        error_messages: ErrorMessages | None | EmptyType = Empty,
+        *filters: Union[StatementFilter, ColumnElement[bool]],
+        auto_commit: Optional[bool] = None,
+        auto_expunge: Optional[bool] = None,
+        error_messages: Union[ErrorMessages, None, EmptyType] = Empty,
         sanity_check: bool = True,
-        load: LoadSpec | None = None,
-        execution_options: dict[str, Any] | None = None,
+        load: Optional[LoadSpec] = None,
+        execution_options: Optional[dict[str, Any]] = None,
+        uniquify: Optional[bool] = None,
         **kwargs: Any,
     ) -> Sequence[ModelT]:
         """Wrap repository scalars operation.
@@ -1056,6 +1118,7 @@ class SQLAlchemyAsyncRepositoryService(
             sanity_check: When true, the length of selected instances is compared to the deleted row count
             load: Set default relationships to be loaded
             execution_options: Set default execution options
+            uniquify: Optionally apply the ``unique()`` method to results before returning.
             **kwargs: Instance attribute value filters.
 
         Returns:
@@ -1071,6 +1134,7 @@ class SQLAlchemyAsyncRepositoryService(
                 sanity_check=sanity_check,
                 load=load,
                 execution_options=execution_options,
+                uniquify=self._get_uniquify(uniquify),
                 **kwargs,
             ),
         )

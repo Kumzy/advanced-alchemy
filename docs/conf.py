@@ -15,7 +15,7 @@ from advanced_alchemy.__metadata__ import __project__, __version__
 if TYPE_CHECKING:
     from typing import Any
 
-    from sphinx.addnodes import document
+    from sphinx.addnodes import document  # type: ignore[attr-defined,unused-ignore]
     from sphinx.application import Sphinx
 
 # -- Environmental Data ------------------------------------------------------
@@ -147,6 +147,12 @@ autodoc_type_aliases = {
     "AsyncEngine": "sqlalchemy.ext.asyncio.AsyncEngine",
     "Engine": "sqlalchemy.engine.Engine",
     "sqlalchemy": "sqlalchemy",
+    "RenameStrategy": "litestar.dto.types.RenameStrategy",
+    "Union": "typing.Union",
+    "Callable": "typing.Callable",
+    "Any": "typing.Any",
+    "Optional": "typing.Optional",
+    "_EchoFlagType": "advanced_alchemy.config._EchoFlagType",
 }
 autodoc_mock_imports = [
     "alembic",

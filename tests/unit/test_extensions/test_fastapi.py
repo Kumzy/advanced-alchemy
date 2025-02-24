@@ -1,6 +1,7 @@
 import sys
+from collections.abc import AsyncGenerator, Generator
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, AsyncGenerator, Callable, Generator, Literal, Union, cast
+from typing import TYPE_CHECKING, Annotated, Callable, Literal, Union, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -11,7 +12,7 @@ from pytest_mock import MockerFixture
 from sqlalchemy import Engine
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from sqlalchemy.orm import Session
-from typing_extensions import Annotated, assert_type
+from typing_extensions import assert_type
 
 from advanced_alchemy.exceptions import ImproperConfigurationError
 from advanced_alchemy.extensions.fastapi import AdvancedAlchemy, SQLAlchemyAsyncConfig, SQLAlchemySyncConfig
@@ -181,9 +182,10 @@ def test_sync_commit_strategies(
     mock_commit = mocker.patch("sqlalchemy.orm.Session.commit")
     mock_close = mocker.patch("sqlalchemy.orm.Session.close")
     mock_rollback = mocker.patch("sqlalchemy.orm.Session.rollback")
+    SessionDependency = Annotated[Session, Depends(alchemy.provide_session())]
 
     @app.get("/")
-    def handler(session: Annotated[Session, Depends(alchemy.provide_session())]) -> Response:
+    def handler(session: SessionDependency) -> Response:  # pyright: ignore[reportInvalidTypeForm,reportMissingTypeArgument,reportUnknownParameterType]
         return Response(status_code=status_code)
 
     with TestClient(app=app) as client:
@@ -229,7 +231,7 @@ def test_async_commit_strategies(
     mock_rollback = mocker.patch("sqlalchemy.ext.asyncio.AsyncSession.rollback")
 
     @app.get("/")
-    def handler(session: Annotated[Session, Depends(alchemy.provide_session())]) -> Response:
+    def handler(session: Annotated[AsyncSession, Depends(alchemy.provide_session())]) -> Response:
         return Response(status_code=status_code)
 
     with TestClient(app=app) as client:

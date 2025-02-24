@@ -1,7 +1,6 @@
-from __future__ import annotations
-
 import contextlib
-from typing import TYPE_CHECKING, Any, Sequence, cast
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any, Union, cast
 
 from litestar.di import Provide
 from litestar.dto import DTOData
@@ -22,7 +21,7 @@ from advanced_alchemy.filters import (
     OrderBy,
     SearchFilter,
 )
-from advanced_alchemy.service import OffsetPagination
+from advanced_alchemy.service import ModelDictListT, ModelDictT, ModelDTOT, ModelOrRowMappingT, ModelT, OffsetPagination
 
 if TYPE_CHECKING:
     from click import Group
@@ -48,6 +47,11 @@ signature_namespace_values: dict[str, Any] = {
     "Dependency": Dependency,
     "DTOData": DTOData,
     "Sequence": Sequence,
+    "ModelT": ModelT,
+    "ModelDictT": ModelDictT,
+    "ModelDTOT": ModelDTOT,
+    "ModelDictListT": ModelDictListT,
+    "ModelOrRowMappingT": ModelOrRowMappingT,
 }
 
 
@@ -56,7 +60,11 @@ class SQLAlchemyInitPlugin(InitPluginProtocol, CLIPluginProtocol, _slots_base.Sl
 
     def __init__(
         self,
-        config: SQLAlchemyAsyncConfig | SQLAlchemySyncConfig | Sequence[SQLAlchemyAsyncConfig | SQLAlchemySyncConfig],
+        config: Union[
+            "SQLAlchemyAsyncConfig",
+            "SQLAlchemySyncConfig",
+            "Sequence[Union[SQLAlchemyAsyncConfig, SQLAlchemySyncConfig]]",
+        ],
     ) -> None:
         """Initialize ``SQLAlchemyPlugin``.
 
@@ -66,10 +74,10 @@ class SQLAlchemyInitPlugin(InitPluginProtocol, CLIPluginProtocol, _slots_base.Sl
         self._config = config
 
     @property
-    def config(self) -> Sequence[SQLAlchemyAsyncConfig | SQLAlchemySyncConfig]:
+    def config(self) -> "Sequence[Union[SQLAlchemyAsyncConfig, SQLAlchemySyncConfig]]":
         return self._config if isinstance(self._config, Sequence) else [self._config]
 
-    def on_cli_init(self, cli: Group) -> None:
+    def on_cli_init(self, cli: "Group") -> None:
         from advanced_alchemy.extensions.litestar.cli import database_group
 
         cli.add_command(database_group)
@@ -84,7 +92,7 @@ class SQLAlchemyInitPlugin(InitPluginProtocol, CLIPluginProtocol, _slots_base.Sl
                 detail="When using multiple configurations, please ensure the `session_dependency_key` and `engine_dependency_key` settings are unique across all configs.  Additionally, iF you are using a custom `before_send` handler, ensure `session_scope_key` is unique.",
             )
 
-    def on_app_init(self, app_config: AppConfig) -> AppConfig:
+    def on_app_init(self, app_config: "AppConfig") -> "AppConfig":
         """Configure application for use with SQLAlchemy.
 
         Args:
